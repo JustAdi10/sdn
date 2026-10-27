@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SDN Flow Monitor</title>
+<style>
+:root{--bg:#f7f7f5;--fg:#1c1c1a;--mut:#74746e;--card:#fff;--line:#e2e2dc;--acc:#2a6df4;--ok:#1d9a5b}
+@media(prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ececE6;--mut:#9a9a92;--card:#1f1f1d;--line:#33332f;--acc:#6b9bff;--ok:#4cc88a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;padding:16px;max-width:1100px;margin:auto}
+h1{font-size:18px;margin:0 0 12px}h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 8px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+button{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto}
+.full{grid-column:1/-1}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{color:var(--mut);font-weight:500}
+.kpi{display:flex;gap:20px;flex-wrap:wrap}.kpi b{display:block;font-size:20px}.kpi span{color:var(--mut);font-size:12px}
+.ins{margin:0;padding-left:18px}.mut{color:var(--mut)}
+svg text{fill:var(--fg);font-size:12px}.node{fill:var(--card);stroke:var(--line);stroke-width:1.5}.link{stroke:var(--mut);stroke-width:1.5}
+.sw{fill:var(--acc);stroke:none}.sw+text{fill:#fff}
+input[type=range]{width:90px;vertical-align:middle}
+</style></head><body>
+<h1>SDN Flow Monitor <span class="mut" style="font-weight:400">· 2 switches · 4 hosts · 1 server · 1 controller</span></h1>
+<div class="bar">
+  <button class="p" onclick="post('start')">Start traffic</button>
+  <button onclick="post('stop')">Stop</button>
+  <button onclick="post('reset')">Reset</button>
+  <span id="status" class="mut"></span>
+</div>
+<div class="grid">
+  <div class="card"><h2>Topology</h2><svg id="topo" viewBox="0 0 440 220" width="100%"></svg></div>
+  <div class="card"><h2>Summary</h2><div class="kpi" id="kpi"></div><h2 style="margin-top:14px">Analysis</h2><ul class="ins" id="ins"></ul></div>
+  <div class="card full"><h2>Flows seen by controller — tick to monitor</h2><table id="flows"></table></div>
+  <div class="card"><h2>Monitored: throughput (Mbit/s)</h2><canvas id="c1" width="480" height="200" style="width:100%"></canvas><div id="leg" class="mut"></div></div>
+  <div class="card"><h2>Traffic generator (packets/s)</h2><div id="gen"></div></div>
+</div>
+<script>
+const $=id=>document.getElementById(id), colors=['#2a6df4','#e8590c','#1d9a5b','#a23fd1','#d6a100','#d6336c'];
+let mon=new Set(), genBuilt=false;
+const post=(p,b)=>fetch('/api/'+p,{method:'POST',body:JSON.stringify(b||{})});
+const fmtB=n=>n>1e6?(n/1e6).toFixed(2)+' MB':n>1e3?(n/1e3).toFixed(1)+' kB':n+' B';
+
+// topology
+const pos={h1:[50,50],h2:[50,170],s1:[170,110],s2:[290,110],h3:[400,30],h4:[400,110],srv:[400,190]};
+const links=[['h1','s1'],['h2','s1'],['s1','s2'],['s2','h3'],['s2','h4'],['s2','srv']];
+$('topo').innerHTML=links.map(([a,b])=>`<line class="link" x1="${pos[a][0]}" y1="${pos[a][1]}" x2="${pos[b][0]}" y2="${pos[b][1]}"/>`).join('')+
+ Object.entries(pos).map(([n,[x,y]])=>n[0]=='s'&&n!='srv'?`<rect class="sw" x="${x-22}" y="${y-16}" width="44" height="32" rx="6"/><text x="${x}" y="${y+4}" text-anchor="middle">${n}</text>`
+ :`<circle class="node" cx="${x}" cy="${y}" r="20"/><text x="${x}" y="${y+4}" text-anchor="middle">${n}</text>`).join('')+
+ `<text x="230" y="215" text-anchor="middle" class="mut">controller polls both switches (flow stats)</text>`;
+
+async function tick(){
+  const s=await (await fetch('/api/state')).json();
+  $('status').textContent=s.running?'● generating traffic':'○ idle';
+  $('kpi').innerHTML=[['Packets',s.total_packets.toLocaleString()],['Bytes',fmtB(s.total_bytes)],['Flows',s.flows.length],['Packet-ins',s.packet_ins],
+    ['Flow entries',Object.entries(s.tables).map(([k,v])=>k+':'+v).join(' ')]].map(([k,v])=>`<div><b>${v}</b><span>${k}</span></div>`).join('');
+  const ins=[];
+  if(s.top_talker)ins.push(`Top talker: <b>${s.top_talker}</b> (${(s.by_src[s.top_talker]/s.total_bytes*100).toFixed(0)}% of bytes)`);
+  if(s.elephants.length)ins.push(`Elephant flow${s.elephants.length>1?'s':''} (&gt;30% of bytes): <b>${s.elephants.join(', ')}</b>`);
+  const pr=Object.entries(s.by_proto).sort((a,b)=>b[1]-a[1]);
+  if(pr.length)ins.push('Protocol mix: '+pr.map(([k,v])=>`${k} ${(v/s.total_bytes*100).toFixed(0)}%`).join(', '));
+  const sm=s.flows.filter(f=>f.packets>50).sort((a,b)=>a.avg_size-b.avg_size)[0];
+  if(sm)ins.push(`Smallest avg packet: <b>${sm.key}</b> (${sm.avg_size.toFixed(0)} B) – control/latency-style traffic`);
+  $('ins').innerHTML=ins.join('').length?ins.map(i=>`<li>${i}</li>`).join(''):'<li class="mut">Start traffic to collect statistics.</li>';
+  mon=new Set(s.flows.filter(f=>f.monitored).map(f=>f.key));
+  if(!document.activeElement||document.activeElement.type!='checkbox')
+  $('flows').innerHTML='<tr><th></th><th>Flow (src&gt;dst:proto/port)</th><th>Packets</th><th>Bytes</th><th>Avg B</th><th>Share</th><th>Rate</th></tr>'+
+   s.flows.map(f=>`<tr><td><input type="checkbox" ${f.monitored?'checked':''} onchange="sel()" value="${f.key}"></td><td>${f.key}</td><td>${f.packets.toLocaleString()}</td><td>${f.bytes.toLocaleString()}</td><td>${f.avg_size.toFixed(0)}</td><td>${(f.share*100).toFixed(1)}%</td><td>${f.rate?f.rate.pps.toFixed(0)+' pps / '+(f.rate.bps/1e6).toFixed(2)+' Mb/s':'<span class=mut>–</span>'}</td></tr>`).join('');
+  if(!genBuilt){genBuilt=true;$('gen').innerHTML=Object.entries(s.rates).map(([n,r])=>`<div>${n.padEnd(6,' ')} <input type="range" min="0" max="150" value="${r}" oninput="this.nextElementSibling.textContent=this.value;post('rate',{name:'${n}',pps:this.value})"> <span>${r}</span></div>`).join('');}
+  chart(s.series);
+}
+function sel(){post('monitor',{flows:[...document.querySelectorAll('#flows input:checked')].map(i=>i.value)})}
+function chart(series){
+  const c=$('c1'),g=c.getContext('2d'),W=c.width,H=c.height,css=getComputedStyle(document.body);
+  g.clearRect(0,0,W,H);g.font='11px system-ui';
+  const ser=Object.entries(series).map(([k,pts])=>[k,pts.slice(1).map((p,i)=>[p[0],8*(p[2]-pts[i][2])/Math.max(.01,p[0]-pts[i][0])/1e6])]);
+  const mx=Math.max(.1,...ser.flatMap(([,p])=>p.map(q=>q[1])))*1.1;
+  g.strokeStyle=css.getPropertyValue('--line');g.fillStyle=css.getPropertyValue('--mut');
+  for(let i=0;i<=4;i++){const y=10+(H-30)*i/4;g.beginPath();g.moveTo(40,y);g.lineTo(W,y);g.stroke();g.fillText((mx*(1-i/4)).toFixed(2),2,y+4)}
+  ser.forEach(([k,p],i)=>{g.strokeStyle=colors[i%6];g.lineWidth=2;g.beginPath();
+    p.forEach(([t,v],j)=>{const x=40+(W-40)*(1+t/60),y=10+(H-30)*(1-v/mx);j?g.lineTo(x,y):g.moveTo(x,y)});g.stroke()});
+  $('leg').innerHTML=ser.map(([k],i)=>`<span style="color:${colors[i%6]}">■</span> ${k} &nbsp;`).join('')||'Select flows in the table.';
+}
+setInterval(tick,1000);tick();
+</script></body></html>

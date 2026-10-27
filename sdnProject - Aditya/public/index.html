@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FLOWSCOPE</title>
+<style>
+:root{--bg:#0a0a08;--panel:#100f0b;--line:#2b2614;--amber:#ffb000;--dim:#8a6a1a;--hot:#ff5a36;--ok:#7dff9a;--fg:#ffd27a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+ background-image:repeating-linear-gradient(0deg,rgba(255,176,0,.03) 0 1px,transparent 1px 3px);min-height:100vh}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:16px;letter-spacing:.35em;color:var(--amber);font-weight:700}
+.sub{color:var(--dim)}
+.ctl button{background:none;border:1px solid var(--dim);color:var(--amber);font:inherit;padding:4px 14px;cursor:pointer;margin-left:6px;text-transform:uppercase;letter-spacing:.1em}
+.ctl button:hover{background:var(--amber);color:#000}
+.led{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px}
+.on .led{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+main{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:0}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+section{padding:16px 20px;border-bottom:1px solid var(--line)}
+aside{border-right:1px solid var(--line)}
+h2{margin:0 0 10px;font-size:11px;letter-spacing:.25em;color:var(--dim);font-weight:400}
+h2::before{content:"▌ ";color:var(--amber)}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 16px}
+.stats b{display:block;font-size:20px;color:var(--amber);font-weight:400}
+.stats span{font-size:11px;color:var(--dim)}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:right;padding:5px 8px;white-space:nowrap;border-bottom:1px dashed var(--line)}
+th{color:var(--dim);font-weight:400;font-size:11px;letter-spacing:.1em}
+td:nth-child(-n+3),th:nth-child(-n+3){text-align:left}
+tr.m td{color:var(--amber);background:rgba(255,176,0,.06)}
+input[type=checkbox]{accent-color:var(--amber)}
+input[type=range]{accent-color:var(--amber);width:80px;vertical-align:middle}
+.wrap{overflow-x:auto}
+#log div{padding:2px 0}#log b{color:var(--amber);font-weight:400}
+#log .warn b{color:var(--hot)}
+.tag{color:var(--dim)}
+svg text{font-family:inherit;fill:var(--fg);font-size:11px}
+</style></head><body>
+<header>
+  <div><h1>FLOWSCOPE</h1><div class="sub">sdn flow monitor · 2 switches · 4 hosts · 1 server · 1 controller</div></div>
+  <div class="ctl"><span id="st" class="sub"><i class="led"></i><span id="stt">idle</span></span>
+    <button onclick="post('start')">Run</button><button onclick="post('stop')">Halt</button><button onclick="post('reset')">Reset</button></div>
+</header>
+<main>
+ <aside>
+  <section><h2>TOPOLOGY</h2><svg id="topo" viewBox="0 0 340 300" width="100%"></svg></section>
+  <section><h2>CONTROLLER</h2><div class="stats" id="kpi"></div></section>
+ </aside>
+ <div>
+  <section><h2>FLOW TABLE · tick to monitor</h2><div class="wrap"><table id="flows"></table></div></section>
+  <section><h2>GENERATOR · packets/s per flow</h2><div class="wrap"><table id="gen"></table></div></section>
+  <section><h2>ANALYSIS</h2><div id="log"></div></section>
+ </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const post=(p,b)=>fetch('/api/'+p,{method:'POST',body:JSON.stringify(b||{})});
+const mb=b=>b>=1e6?(b/1e6).toFixed(2)+' Mb/s':(b/1e3).toFixed(0)+' kb/s';
+const sz=n=>n>=1e6?(n/1e6).toFixed(2)+' MB':n>=1e3?(n/1e3).toFixed(1)+' kB':n+' B';
+let mon=new Set(), genBuilt=false, S=null, edit=false;
+
+// topology: vertical, controller on top
+const P={ctl:[170,28],s1:[80,120],s2:[260,120],h1:[30,230],h2:[80,270],srv:[135,230],h3:[225,230],h4:[290,270]};
+const L=[['h1','s1'],['h2','s1'],['srv','s1'],['s1','s2'],['s2','h3'],['s2','h4']];
+$('topo').innerHTML=
+ ['s1','s2'].map(s=>`<line x1="170" y1="28" x2="${P[s][0]}" y2="${P[s][1]}" stroke="#2b2614" stroke-dasharray="3 4"/>`).join('')+
+ L.map(([a,b],i)=>`<line id="l${i}" x1="${P[a][0]}" y1="${P[a][1]}" x2="${P[b][0]}" y2="${P[b][1]}" stroke="#8a6a1a" stroke-width="1.5"/>`).join('')+
+ '<g id="dots"></g>'+
+ Object.entries(P).map(([n,[x,y]])=>{
+  const sw=n[0]=='s'&&n!='srv', c=n=='ctl';
+  return `<rect x="${x-22}" y="${y-13}" width="44" height="26" fill="#0a0a08" stroke="${c?'#ff5a36':'#ffb000'}" stroke-width="${sw||c?2:1}" ${sw?'':'rx="13"'}/>
+  <text x="${x}" y="${y+4}" text-anchor="middle" fill="${c?'#ff5a36':''}">${c?'CTRL':n.toUpperCase()}</text>`}).join('');
+const edge=(a,b)=>L.findIndex(([x,y])=>(x==a&&y==b)||(x==b&&y==a));
+let dots=[];
+function spawn(){ if(!S||!S.running)return;
+  for(const f of S.flows){ if(!f.pps||Math.random()>Math.min(1,f.pps/90)) continue;
+    dots.push({f,t:0,s:.6+Math.random()*.3}); } }
+setInterval(spawn,120);
+let lastT=performance.now();
+function anim(now){const dt=(now-lastT)/1000;lastT=now;
+  dots=dots.filter(d=>(d.t+=dt*d.s)<1);
+  $('dots').innerHTML=dots.map(d=>{const p=d.f.path,seg=(p.length-1)*d.t,i=Math.min(p.length-2,Math.floor(seg)),u=seg-i;
+   const a=P[p[i]],b=P[p[i+1]];return `<circle cx="${a[0]+(b[0]-a[0])*u}" cy="${a[1]+(b[1]-a[1])*u}" r="${d.f.monitored?3.2:2}" fill="${d.f.monitored?'#ffb000':'#ffd27a'}" opacity=".85"/>`}).join('');
+  requestAnimationFrame(anim)}
+requestAnimationFrame(anim);
+
+function spark(h){ if(h.length<2)return '<span class="tag">—</span>';
+  const v=h.map(p=>p.bps),mx=Math.max(...v,1),w=90,ht=18;
+  return `<svg width="${w}" height="${ht}"><polyline fill="none" stroke="#ffb000" stroke-width="1.3" points="${v.map((y,i)=>`${(i/(v.length-1)*w).toFixed(1)},${(ht-1-y/mx*(ht-2)).toFixed(1)}`).join(' ')}"/></svg>`}
+
+function render(){ const s=S;
+  $('st').className=s.running?'sub on':'sub'; $('stt').textContent=s.running?`running ${s.uptime.toFixed(0)}s`:'idle';
+  const tp=s.flows.reduce((a,f)=>a+f.packets,0), tb=s.flows.reduce((a,f)=>a+f.bytes,0), rate=s.flows.reduce((a,f)=>a+f.bps,0);
+  $('kpi').innerHTML=[['packet-in events',s.packetIns],['flow entries',s.flowEntries],['packets seen',tp.toLocaleString()],['bytes seen',sz(tb)],['live rate',mb(rate)],['monitored',s.flows.filter(f=>f.monitored).length+'/'+s.flows.length]]
+   .map(([k,v])=>`<div><b>${v}</b><span>${k}</span></div>`).join('');
+  $('flows').innerHTML='<tr><th></th><th>flow</th><th>match</th><th>path</th><th>packets</th><th>bytes</th><th>pkt/s</th><th>rate</th><th>trend</th></tr>'+
+   s.flows.map(f=>`<tr class="${f.monitored?'m':''}"><td><input type="checkbox" ${f.monitored?'checked':''} onchange="tick('${f.key}',this.checked)"></td>
+   <td>${f.name}</td><td class="tag">${f.key}</td><td>${f.path.join('›')}</td><td>${f.packets.toLocaleString()}</td><td>${sz(f.bytes)}</td><td>${f.pps.toFixed(0)}</td><td>${mb(f.bps)}</td><td>${f.monitored?spark(f.history):'<span class="tag">off</span>'}</td></tr>`).join('');
+  if(!edit){ if(!genBuilt){ genBuilt=true; $('gen').innerHTML=s.flows.map(f=>`<tr><td>${f.name}</td><td class="tag">${f.src}→${f.dst}</td><td></td>
+   <td><input type="range" min="0" max="200" value="${f.configuredPps}" oninput="rate('${f.name}',this)" onchange="edit=false"><span id="r_${f.name}"> ${f.configuredPps}</span></td></tr>`).join('') } }
+  $('log').innerHTML=s.analysis.map(a=>{const [k,...r]=a.split('  ');return `<div class="${k=='BURST'?'warn':''}"><b>${k}</b>  ${r.join('  ')}</div>`}).join('');
+}
+function tick(k,on){ on?mon.add(k):mon.delete(k); post('monitor',{flows:[...mon]}); }
+function rate(n,el){ edit=true; $('r_'+n).textContent=' '+el.value; post('rate',{name:n,pps:+el.value}); }
+async function poll(){ try{ S=await (await fetch('/api/state')).json(); S.flows.forEach(f=>f.monitored&&mon.add(f.key)); render(); }catch(e){} }
+setInterval(poll,1000); poll();
+</script></body></html>
