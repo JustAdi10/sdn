@@ -49,23 +49,65 @@ The monitored flows use OpenFlow-style match fields such as source, destination,
 
 ## 4. Cloud-server setup
 
+The commands below assume a fresh Ubuntu cloud server and a user with `sudo`
+access. Run each command in the shell shown; keep the controller and Mininet
+running in separate SSH sessions.
+
+### 4.1 Connect to the server
+
+From your local computer, replace the placeholders with the server's address
+and SSH username:
+
+```bash
+ssh -i ~/.ssh/<private-key> <username>@<server-ip>
+```
+
+Confirm the operating system and update its package index:
+
+```bash
+hostname
+cat /etc/os-release
+sudo apt update
+sudo apt upgrade -y
+```
+
 After connecting to the Ubuntu cloud server over SSH, install the required packages:
 
 ```bash
 sudo apt update
-sudo apt install -y mininet openvswitch-switch python3-pip git curl
-pip3 install ryu
+sudo apt install -y \
+  mininet \
+  openvswitch-switch \
+  python3-pip \
+  python3-venv \
+  git \
+  curl
+
+python3 -m venv ~/sdn-venv
+source ~/sdn-venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ryu
 ```
 
 Verify the tools:
 
 ```bash
+command -v mn
+command -v ovs-vsctl
+command -v ryu-manager
 mn --version
 ovs-vsctl --version
 ryu-manager --version
 ```
 
 Mininet creates the hosts, links, and Open vSwitch instances. Ryu is started as a separate process and accepts OpenFlow switch connections, normally on TCP port `6653`.
+
+If Open vSwitch is not running, start it and enable it at boot:
+
+```bash
+sudo systemctl enable --now openvswitch-switch
+sudo systemctl status --no-pager openvswitch-switch
+```
 
 ## 5. Ryu controller responsibilities
 
@@ -93,40 +135,116 @@ Only selected flow keys are placed in the monitoring set. This keeps the analysi
 
 ## 6. Running the experiment
 
-Start the Ryu controller on the cloud server:
+### 6.1 Download the project
+
+In the SSH session where the project will run:
 
 ```bash
+cd ~
+git clone https://github.com/JustAdi10/sdn.git
+cd "sdn/sdnProject - Aditya"
+chmod +x run.sh
+```
+
+Check that the expected files are present:
+
+```bash
+find . -maxdepth 2 -type f -print | sort
+```
+
+### 6.2 Start the Ryu controller
+
+Open **SSH session 1**, activate the virtual environment, change to the
+project directory, and start the controller:
+
+```bash
+source ~/sdn-venv/bin/activate
+cd ~/sdn/"sdnProject - Aditya"
 ryu-manager --verbose flow_monitor.py
 ```
 
-Start the Mininet topology in a second SSH session. The exact topology script may be named differently in the deployment, but it should create `h1`, `h2`, `h3`, `h4`, `srv`, `s1`, and `s2`, and connect the switches to the Ryu controller:
+If the controller is running on another machine, replace its address in the
+topology command with that machine's private IP. Confirm that the OpenFlow
+port is listening:
+
+```bash
+sudo ss -ltnp | grep ':6653'
+```
+
+### 6.3 Start Mininet
+
+Open **SSH session 2**. Clean up stale Mininet processes before starting a
+new run:
 
 ```bash
 sudo mn -c
+sudo python3 topology.py --controller=remote,ip=127.0.0.1,port=6653
+```
+
+The exact topology script may be named differently in the deployment. It
+should create `h1`, `h2`, `h3`, `h4`, `srv`, `s1`, and `s2`, and connect the
+switches to the Ryu controller. If the script already defines the controller,
+use its documented command instead:
+
+```bash
 sudo python3 topology.py
 ```
 
-From the Mininet CLI, inspect the topology and generate traffic:
+From the Mininet CLI, verify every node and link before generating traffic:
 
 ```text
 mininet> nodes
 mininet> net
+mininet> dump
+mininet> links
+mininet> pingall
 mininet> h1 ping -c 5 srv
 mininet> h2 ping -c 5 h3
 mininet> h1 iperf -s &
 mininet> h2 iperf -c h1 -t 20
 ```
 
-The traffic generator can also create repeated TCP and UDP flows at configurable packet rates. The controller polls the switches while traffic is running, so the resulting counters can be compared across flows and switches.
+For a longer TCP test, run the server and client on explicit ports:
+
+```text
+mininet> h1 iperf -s -p 5001 &
+mininet> h2 iperf -c 10.0.0.1 -p 5001 -t 60
+```
+
+The traffic generator can also create repeated TCP and UDP flows at
+configurable packet rates. The controller polls the switches while traffic is
+running, so the resulting counters can be compared across flows and switches.
 
 To inspect the OpenFlow tables directly:
 
 ```bash
 sudo ovs-ofctl -O OpenFlow13 dump-flows s1
 sudo ovs-ofctl -O OpenFlow13 dump-flows s2
+sudo ovs-ofctl -O OpenFlow13 show s1
+sudo ovs-ofctl -O OpenFlow13 show s2
 ```
 
 Use the OpenFlow version configured by the topology and controller if it differs from `OpenFlow13`.
+
+### 6.4 Stop and clean up Mininet
+
+When the experiment is finished, leave the Mininet CLI and remove its
+namespaces, switches, and links:
+
+```text
+mininet> exit
+```
+
+```bash
+sudo mn -c
+```
+
+Stop the controller with `Ctrl+C` in SSH session 1. If a previous run left a
+process behind, identify it before stopping it:
+
+```bash
+pgrep -af 'ryu-manager|server.js'
+```
 
 ## 7. FLOWSCOPE project console
 
@@ -137,13 +255,53 @@ The files in this directory provide a browser-based console for demonstrating th
 - `public/index.html`: displays the topology, flow table, traffic generator, counters, rates, trends, and analysis messages.
 - `run.sh`: starts the console, begins traffic generation, selects monitored flows, and opens the browser when supported.
 
-Run the console from this directory:
+Run the console from this directory. The script starts the Node.js server,
+starts simulated traffic, selects representative monitored flows, and prints
+the URL:
 
 ```bash
+cd ~/sdn/"sdnProject - Aditya"
+chmod +x run.sh
 ./run.sh
 ```
 
 Then open `http://localhost:8100`. The console starts with representative web, TLS, DNS, video, SSH, and bulk-transfer flows. Use the **Run**, **Halt**, and **Reset** controls to manage the experiment, adjust packets per second, and select flows for monitoring.
+
+For a server without a graphical browser, start the console without
+`run.sh` and use SSH port forwarding from your local computer:
+
+```bash
+cd ~/sdn/"sdnProject - Aditya"
+node server.js
+```
+
+In a second local terminal:
+
+```bash
+ssh -N -L 8100:127.0.0.1:8100 -i ~/.ssh/<private-key> <username>@<server-ip>
+```
+
+Then open `http://localhost:8100` in the local browser. To check the API
+without opening a browser:
+
+```bash
+curl --fail http://127.0.0.1:8100/api/state | python3 -m json.tool
+curl --fail -X POST http://127.0.0.1:8100/api/start
+curl --fail -X POST http://127.0.0.1:8100/api/monitor \
+  -H 'Content-Type: application/json' \
+  -d '{"flows":["h1>srv:tcp/80","h1>h4:udp/5004","h3>srv:udp/53"]}'
+curl --fail http://127.0.0.1:8100/api/state | python3 -m json.tool
+```
+
+### 7.1 FLOWSCOPE screenshots
+
+The following screenshots show the frontend with the simulated network
+running, monitored flows selected, counters populated, and analysis messages
+visible.
+
+![FLOWSCOPE frontend at desktop width](docs/screenshots/flowscope-wide.png)
+
+![FLOWSCOPE frontend full page](docs/screenshots/flowscope-full.png)
 
 The console is a visual and executable representation of the SDN monitoring concepts used in the cloud experiment. The live cloud deployment used Mininet, Open vSwitch, Ryu, and OpenFlow; the console provides a lightweight way to inspect the same topology and statistics workflow without requiring the cloud network to be running.
 
